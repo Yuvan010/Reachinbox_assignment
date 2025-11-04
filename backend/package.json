@@ -1,10 +1,10 @@
 {
   "name": "email-onebox-backend",
   "version": "1.0.0",
-  "main": "dist/index.js",
   "scripts": {
     "start": "ts-node src/index.ts",
-    "dev": "nodemon src/index.ts"
+    "dev": "nodemon src/index.ts",
+    "build": "echo 'No build step needed for backend'"
   },
   "dependencies": {
     "@elastic/elasticsearch": "^8.10.0",
