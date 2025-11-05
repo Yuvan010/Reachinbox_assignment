@@ -1,57 +1,62 @@
-import { Client } from "@elastic/elasticsearch";
+let emailsStore: any[] = [];
 
-export const esClient = new Client({ 
-  node: process.env.ELASTICSEARCH_URL || "https://1273ff0211:a3a4330b62ebc745757b@yuvan-1j14v67b.us-east-1.bonsaisearch.net",
-  tls: {
-    rejectUnauthorized: false,
-  },
-  requestTimeout: 30000,
-  // Add compatibility mode for Bonsai (Elasticsearch 7.x)
-  compatibilityMode: 'es7'
-});
+export const esClient = {
+  // Mock client that doesn't actually connect to Elasticsearch
+  indices: {
+    exists: async () => true,
+    create: async () => ({ acknowledged: true }),
+    putMapping: async () => ({ acknowledged: true })
+  }
+};
 
 export async function ensureIndex() {
-  try {
-    const exists = await esClient.indices.exists({ index: "emails" });
-    
-    if (!exists) {
-      await esClient.indices.create({
-        index: "emails",
-        body: {
-          mappings: {
-            properties: {
-              subject: { type: "text" },
-              from: { type: "keyword" },
-              body: { type: "text" },
-              category: { type: "keyword" },
-              category_lower: { type: "keyword" },
-              date: { type: "date" },
-            },
-          },
-        },
-      });
-      console.log("✅ Created Elasticsearch index with mapping: emails");
-    } else {
-      console.log("✅ Elasticsearch index already exists: emails");
-      
-      // Optional: update mapping if missing
-      try {
-        await esClient.indices.putMapping({
-          index: "emails",
-          body: {
-            properties: {
-              category: { type: "keyword" },
-              category_lower: { type: "keyword" },
-            },
-          },
-        });
-        console.log("✅ Updated index mapping");
-      } catch (e: any) {
-        console.warn("⚠️ Mapping update warning:", e?.message ?? e);
-      }
-    }
-  } catch (error: any) {
-    console.error("❌ Elasticsearch setup error:", error?.message ?? error);
-    throw error;
+  console.log("✅ Using in-memory storage (no Elasticsearch needed)");
+  return;
+}
+
+// Store email in memory
+export async function indexEmail(email: any) {
+  emailsStore.push({
+    ...email,
+    id: Date.now().toString(),
+    indexed_at: new Date()
+  });
+  console.log(`✅ Stored email in memory: ${email.subject}`);
+  return { _id: emailsStore.length - 1 };
+}
+
+// Search emails in memory
+export async function searchEmails(query: any) {
+  const { category_lower, size = 10 } = query;
+  
+  let results = emailsStore;
+  
+  // Filter by category if provided
+  if (category_lower) {
+    results = results.filter(email => 
+      email.category_lower === category_lower
+    );
   }
+  
+  // Limit results
+  results = results.slice(0, size);
+  
+  return {
+    hits: {
+      hits: results.map(email => ({
+        _source: email
+      }))
+    }
+  };
+}
+
+// Get all emails
+export function getAllEmails() {
+  return emailsStore;
+}
+
+// Clear all emails
+export function clearEmails() {
+  emailsStore = [];
+  console.log("✅ Cleared all emails from memory");
 }
