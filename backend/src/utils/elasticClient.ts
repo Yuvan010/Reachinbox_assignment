@@ -1,6 +1,6 @@
 import { Client } from "@elastic/elasticsearch";
 
-export const esClient = new Client({ node: "http://localhost:9200" });
+export const esClient = new Client({ node: "https://df7af82dd6ce4113a6cd7afc191c9bcb.us-central1.gcp.cloud.es.io:443" });
 
 export async function ensureIndex() {
   const exists = await esClient.indices.exists({ index: "emails" });
