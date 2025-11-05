@@ -1,6 +1,5 @@
 import dotenv from "dotenv";
 import axios from "axios";
-import { esClient } from "../utils/elasticClient";
 
 dotenv.config();
 
@@ -8,6 +7,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "llama-3.1-8b-instant"; 
 
+// In-memory knowledge base (no Elasticsearch needed!)
 const outreachDocs = [
   {
     id: "1",
@@ -24,48 +24,22 @@ const outreachDocs = [
 ];
 
 export async function ensureRagIndex() {
-  const indexExists = await esClient.indices.exists({ index: "rag_knowledge" });
-  if (!indexExists) {
-    await esClient.indices.create({
-      index: "rag_knowledge",
-      body: {
-        mappings: {
-          properties: {
-            text: { type: "text" },
-          },
-        },
-      },
-    });
-    console.log(" Created RAG index: rag_knowledge");
-
-    for (const doc of outreachDocs) {
-      await esClient.index({
-        index: "rag_knowledge",
-        id: doc.id,
-        document: doc,
-      });
-    }
-    await esClient.indices.refresh({ index: "rag_knowledge" });
-  }
+  console.log("✅ Using in-memory knowledge base (no Elasticsearch required)");
+  return;
 }
 
+// Simple keyword matching for context retrieval
 async function getRelevantContext(query: string): Promise<string> {
-  const result = await esClient.search({
-    index: "rag_knowledge",
-    size: 2,
-    query: {
-      match: { text: query },
-    },
-  });
-
-  const hits = result.hits.hits.map((h: any) => h._source.text);
-  return hits.join("\n");
+  // Return all knowledge base items for now
+  // You could add keyword matching here if needed
+  const relevantDocs = outreachDocs.map(doc => doc.text);
+  return relevantDocs.join("\n");
 }
 
 export async function suggestReply(emailSubject: string, emailBody: string): Promise<string> {
   try {
     const context = await getRelevantContext(emailBody);
-
+    
     const systemPrompt = `You are an intelligent email assistant that writes contextual, professional email replies.
 
 Your approach:
@@ -75,6 +49,8 @@ Your approach:
 4. Adapt your tone to match the email (formal for business, friendly for casual, enthusiastic for opportunities)
 
 Guidelines:
+${context}
+
 - For job/application emails: Express gratitude and interest
 - For meeting invites: Confirm or provide availability
 - For questions: Answer directly and helpfully
@@ -122,7 +98,7 @@ Write an appropriate, contextual reply:`;
     console.log("💬 Suggested reply:", text);
     return text;
   } catch (err: any) {
-    console.error(" RAG suggestReply error:", {
+    console.error("❌ RAG suggestReply error:", {
       status: err.response?.status,
       data: err.response?.data,
       message: err.message
