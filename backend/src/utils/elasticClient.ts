@@ -1,6 +1,9 @@
 import { Client } from "@elastic/elasticsearch";
 
-export const esClient = new Client({ node: "https://1273ff0211:a3a4330b62ebc745757b@yuvan-1j14v67b.us-east-1.bonsaisearch.net" });
+export const esClient = new Client({ node: "https://1273ff0211:a3a4330b62ebc745757b@yuvan-1j14v67b.us-east-1.bonsaisearch.net" tls: {
+    rejectUnauthorized: false,  // Allows self-signed certificates
+  },
+  requestTimeout: 30000,});
 
 export async function ensureIndex() {
   const exists = await esClient.indices.exists({ index: "emails" });
