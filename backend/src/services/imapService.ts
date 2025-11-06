@@ -1,99 +1,191 @@
-import { ImapFlow } from "imapflow";
-import { lookup as dnsLookup } from "dns/promises";
-import { esClient, ensureIndex } from "../utils/elasticClient";
-import { categorizeEmail } from "./aiService";
-import { sendSlackAlert } from "./slackService";
+// In-memory email storage (no Elasticsearch needed)
 
-export async function startImapSync() {
-  try {
-    await ensureIndex();
+interface Email {
+  id?: string;
+  subject?: string;
+  from?: string;
+  body?: string;
+  category?: string;
+  category_lower?: string;
+  date?: Date | string;
+  [key: string]: any;
+}
 
-    const imapOptions: any = {
-      host: "imap.gmail.com",
-      port: 993,
-      secure: true,
-      auth: {
-        user: process.env.GMAIL_USER || "",
-        pass: process.env.GMAIL_PASS || "",
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
+// In-memory store
+let emailsStore: Email[] = [];
+
+// Mock Elasticsearch client with all necessary methods
+export const esClient = {
+  // Index operations
+  indices: {
+    exists: async (params: any) => {
+      console.log(`✅ Mock: Index "${params.index}" exists check`);
+      return true;
+    },
+    
+    create: async (params: any) => {
+      console.log(`✅ Mock: Created index "${params.index}"`);
+      return { acknowledged: true };
+    },
+    
+    putMapping: async (params: any) => {
+      console.log(`✅ Mock: Updated mapping for "${params.index}"`);
+      return { acknowledged: true };
+    },
+    
+    refresh: async (params: any) => {
+      console.log(`✅ Mock: Refreshed index "${params.index}"`);
+      return { acknowledged: true };
+    }
+  },
+  
+  // Index a document
+  index: async (params: any) => {
+    const { index, id, document, body } = params;
+    const doc = document || body;
+    
+    const email: Email = {
+      ...doc,
+      id: id || Date.now().toString(),
+      indexed_at: new Date()
     };
-
-
-    imapOptions.lookup = async (hostname: string, options: any, callback: any) => {
-      try {
-        const result = await dnsLookup(hostname, { ...options, family: 4 });
-        callback(null, result.address, result.family);
-      } catch (err) {
-        callback(err, undefined, undefined);
-      }
+    
+    // Store in memory
+    const existingIndex = emailsStore.findIndex(e => e.id === email.id);
+    if (existingIndex >= 0) {
+      emailsStore[existingIndex] = email;
+    } else {
+      emailsStore.push(email);
+    }
+    
+    console.log(`✅ Stored email in memory: ${email.subject || 'No subject'} (Total: ${emailsStore.length})`);
+    
+    return { 
+      _id: email.id,
+      result: 'created',
+      _index: index
     };
-
-    const imap = new ImapFlow(imapOptions);
-
-    console.log("📨 Connecting to Gmail IMAP...");
-    await imap.connect();
-    await imap.mailboxOpen("INBOX");
-
-    console.log("Connected to Gmail Inbox");
-
-    const sinceDate = new Date();
-    sinceDate.setMonth(sinceDate.getMonth() - 1);
-    console.log(`📅 Fetching emails since ${sinceDate.toISOString().split("T")[0]}`);
-
-    for await (let message of imap.fetch(
-      { since: sinceDate },
-      { envelope: true, source: true }
-    )) {
-      const subject = message?.envelope?.subject ?? "No subject";
-      const from = message?.envelope?.from?.[0]?.address ?? "Unknown sender";
-      const body = message?.source?.toString()?.slice(0, 1500) ?? "";
-
-      console.log(`📧 New Email: ${subject} — from ${from}`);
-
-      const categoryRaw = await categorizeEmail(subject, body);
-      const category = (categoryRaw || "Uncategorized").trim();
-      const category_lower = category.toLowerCase();
-
-      console.log(`Categorized as: ${category}`);
-
-      const doc = {
-        subject,
-        from,
-        body,
-        category,
-        category_lower,
-        date: new Date().toISOString(),
-      };
-
-      await esClient.index({
-        index: "emails",
-        document: doc,
-      });
-
-      await esClient.indices.refresh({ index: "emails" });
-
-      switch (category_lower) {
-        case "interested":
-          await sendSlackAlert(` *Interested lead detected!*\n*Subject:* ${subject}\n*From:* ${from}`);
-          break;
-        case "meeting booked":
-          await sendSlackAlert(` *Meeting Booked!*\n*Subject:* ${subject}\n*From:* ${from}`);
-          break;
-        case "spam":
-          console.log(" Spam email detected — logged only.");
-          break;
-        default:
-          console.log("Logged email (other category).");
-          break;
+  },
+  
+  // Search documents
+  search: async (params: any) => {
+    const { index, query, size = 10 } = params;
+    
+    let results = [...emailsStore];
+    
+    // Simple filtering based on query
+    if (query && query.match) {
+      const field = Object.keys(query.match)[0];
+      const value = query.match[field];
+      
+      if (field && value) {
+        results = results.filter(email => {
+          const fieldValue = email[field];
+          if (typeof fieldValue === 'string') {
+            return fieldValue.toLowerCase().includes(value.toLowerCase());
+          }
+          return false;
+        });
       }
     }
-
-    await imap.logout();
-    console.log(" Email sync complete");
-  } catch (err) {
-    console.error("IMAP sync error:", err);
+    
+    // Limit results
+    results = results.slice(0, size);
+    
+    console.log(`✅ Search in "${index}": Found ${results.length} results`);
+    
+    return {
+      hits: {
+        total: { value: results.length },
+        hits: results.map(email => ({
+          _id: email.id,
+          _source: email
+        }))
+      }
+    };
+  },
+  
+  // Get a document by ID
+  get: async (params: any) => {
+    const { index, id } = params;
+    const email = emailsStore.find(e => e.id === id);
+    
+    if (email) {
+      return {
+        _id: id,
+        _source: email,
+        found: true
+      };
+    }
+    
+    throw new Error(`Document not found: ${id}`);
+  },
+  
+  // Update a document
+  update: async (params: any) => {
+    const { index, id, body, doc } = params;
+    const updates = doc || body?.doc || body;
+    
+    const emailIndex = emailsStore.findIndex(e => e.id === id);
+    
+    if (emailIndex >= 0) {
+      emailsStore[emailIndex] = {
+        ...emailsStore[emailIndex],
+        ...updates
+      };
+      console.log(`✅ Updated email in memory: ${id}`);
+      return { result: 'updated' };
+    }
+    
+    throw new Error(`Document not found: ${id}`);
+  },
+  
+  // Delete a document
+  delete: async (params: any) => {
+    const { index, id } = params;
+    const emailIndex = emailsStore.findIndex(e => e.id === id);
+    
+    if (emailIndex >= 0) {
+      emailsStore.splice(emailIndex, 1);
+      console.log(`✅ Deleted email from memory: ${id}`);
+      return { result: 'deleted' };
+    }
+    
+    throw new Error(`Document not found: ${id}`);
   }
+};
+
+// Helper functions for direct access
+export async function ensureIndex() {
+  console.log("✅ Using in-memory storage (no Elasticsearch needed)");
+  return;
+}
+
+export async function indexEmail(email: Email) {
+  return await esClient.index({
+    index: 'emails',
+    id: email.id || Date.now().toString(),
+    document: email
+  });
+}
+
+export async function searchEmails(query: any, size = 10) {
+  return await esClient.search({
+    index: 'emails',
+    query,
+    size
+  });
+}
+
+export function getAllEmails() {
+  return emailsStore;
+}
+
+export function clearEmails() {
+  emailsStore = [];
+  console.log("✅ Cleared all emails from memory");
+}
+
+export function getEmailCount() {
+  return emailsStore.length;
 }
