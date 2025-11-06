@@ -1,191 +1,136 @@
-// In-memory email storage (no Elasticsearch needed)
+import Imap from "imap";
+import { simpleParser } from "mailparser";
+import { esClient } from "../utils/elasticClient";
 
-interface Email {
-  id?: string;
-  subject?: string;
-  from?: string;
-  body?: string;
-  category?: string;
-  category_lower?: string;
-  date?: Date | string;
-  [key: string]: any;
-}
+const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_PASSWORD = process.env.GMAIL_PASS || "";
 
-// In-memory store
-let emailsStore: Email[] = [];
+let imap: Imap | null = null;
 
-// Mock Elasticsearch client with all necessary methods
-export const esClient = {
-  // Index operations
-  indices: {
-    exists: async (params: any) => {
-      console.log(`✅ Mock: Index "${params.index}" exists check`);
-      return true;
-    },
-    
-    create: async (params: any) => {
-      console.log(`✅ Mock: Created index "${params.index}"`);
-      return { acknowledged: true };
-    },
-    
-    putMapping: async (params: any) => {
-      console.log(`✅ Mock: Updated mapping for "${params.index}"`);
-      return { acknowledged: true };
-    },
-    
-    refresh: async (params: any) => {
-      console.log(`✅ Mock: Refreshed index "${params.index}"`);
-      return { acknowledged: true };
-    }
-  },
-  
-  // Index a document
-  index: async (params: any) => {
-    const { index, id, document, body } = params;
-    const doc = document || body;
-    
-    const email: Email = {
-      ...doc,
-      id: id || Date.now().toString(),
-      indexed_at: new Date()
-    };
-    
-    // Store in memory
-    const existingIndex = emailsStore.findIndex(e => e.id === email.id);
-    if (existingIndex >= 0) {
-      emailsStore[existingIndex] = email;
-    } else {
-      emailsStore.push(email);
-    }
-    
-    console.log(`✅ Stored email in memory: ${email.subject || 'No subject'} (Total: ${emailsStore.length})`);
-    
-    return { 
-      _id: email.id,
-      result: 'created',
-      _index: index
-    };
-  },
-  
-  // Search documents
-  search: async (params: any) => {
-    const { index, query, size = 10 } = params;
-    
-    let results = [...emailsStore];
-    
-    // Simple filtering based on query
-    if (query && query.match) {
-      const field = Object.keys(query.match)[0];
-      const value = query.match[field];
-      
-      if (field && value) {
-        results = results.filter(email => {
-          const fieldValue = email[field];
-          if (typeof fieldValue === 'string') {
-            return fieldValue.toLowerCase().includes(value.toLowerCase());
-          }
-          return false;
-        });
-      }
-    }
-    
-    // Limit results
-    results = results.slice(0, size);
-    
-    console.log(`✅ Search in "${index}": Found ${results.length} results`);
-    
-    return {
-      hits: {
-        total: { value: results.length },
-        hits: results.map(email => ({
-          _id: email.id,
-          _source: email
-        }))
-      }
-    };
-  },
-  
-  // Get a document by ID
-  get: async (params: any) => {
-    const { index, id } = params;
-    const email = emailsStore.find(e => e.id === id);
-    
-    if (email) {
-      return {
-        _id: id,
-        _source: email,
-        found: true
-      };
-    }
-    
-    throw new Error(`Document not found: ${id}`);
-  },
-  
-  // Update a document
-  update: async (params: any) => {
-    const { index, id, body, doc } = params;
-    const updates = doc || body?.doc || body;
-    
-    const emailIndex = emailsStore.findIndex(e => e.id === id);
-    
-    if (emailIndex >= 0) {
-      emailsStore[emailIndex] = {
-        ...emailsStore[emailIndex],
-        ...updates
-      };
-      console.log(`✅ Updated email in memory: ${id}`);
-      return { result: 'updated' };
-    }
-    
-    throw new Error(`Document not found: ${id}`);
-  },
-  
-  // Delete a document
-  delete: async (params: any) => {
-    const { index, id } = params;
-    const emailIndex = emailsStore.findIndex(e => e.id === id);
-    
-    if (emailIndex >= 0) {
-      emailsStore.splice(emailIndex, 1);
-      console.log(`✅ Deleted email from memory: ${id}`);
-      return { result: 'deleted' };
-    }
-    
-    throw new Error(`Document not found: ${id}`);
+export function startImapSync() {
+  // Don't start if credentials are missing
+  if (!GMAIL_USER || !GMAIL_PASSWORD) {
+    console.log("⚠️ IMAP credentials not configured. Email sync disabled.");
+    return;
   }
-};
 
-// Helper functions for direct access
-export async function ensureIndex() {
-  console.log("✅ Using in-memory storage (no Elasticsearch needed)");
-  return;
+  try {
+    imap = new Imap({
+      user: GMAIL_USER,
+      password: GMAIL_PASSWORD,
+      host: "imap.gmail.com",
+      port: 993,
+      tls: true,
+      tlsOptions: { rejectUnauthorized: false },
+    });
+
+    imap.once("ready", () => {
+      console.log("✅ IMAP connected");
+      openInbox();
+    });
+
+    imap.once("error", (err: Error) => {
+      console.error("❌ IMAP error:", err.message);
+    });
+
+    imap.once("end", () => {
+      console.log("⚠️ IMAP connection ended");
+    });
+
+    imap.connect();
+  } catch (error: any) {
+    console.error("❌ Failed to start IMAP sync:", error.message);
+  }
 }
 
-export async function indexEmail(email: Email) {
-  return await esClient.index({
-    index: 'emails',
-    id: email.id || Date.now().toString(),
-    document: email
+function openInbox() {
+  if (!imap) return;
+
+  imap.openBox("INBOX", false, (err, box) => {
+    if (err) {
+      console.error("❌ Error opening inbox:", err.message);
+      return;
+    }
+
+    console.log(`✅ Inbox opened. ${box.messages.total} total messages`);
+
+    // Listen for new emails
+    imap.on("mail", () => {
+      console.log("📧 New mail detected");
+      fetchRecentEmails();
+    });
+
+    // Fetch recent emails on startup
+    fetchRecentEmails();
   });
 }
 
-export async function searchEmails(query: any, size = 10) {
-  return await esClient.search({
-    index: 'emails',
-    query,
-    size
-  });
+function fetchRecentEmails() {
+  if (!imap) return;
+
+  try {
+    // Fetch last 10 emails
+    imap.search(["ALL"], (err, results) => {
+      if (err) {
+        console.error("❌ Search error:", err.message);
+        return;
+      }
+
+      if (!results || results.length === 0) {
+        console.log("📭 No emails found");
+        return;
+      }
+
+      // Get last 10 emails
+      const recentEmails = results.slice(-10);
+      const fetch = imap.fetch(recentEmails, { bodies: "" });
+
+      fetch.on("message", (msg) => {
+        msg.on("body", (stream) => {
+          simpleParser(stream, async (err, parsed) => {
+            if (err) {
+              console.error("❌ Parse error:", err.message);
+              return;
+            }
+
+            try {
+              await esClient.index({
+                index: "emails",
+                id: parsed.messageId || `${Date.now()}-${Math.random()}`,
+                document: {
+                  subject: parsed.subject || "No Subject",
+                  from: parsed.from?.text || "Unknown",
+                  body: parsed.text || parsed.html || "",
+                  date: parsed.date || new Date(),
+                  category: "Uncategorized",
+                  category_lower: "uncategorized",
+                },
+              });
+
+              console.log(`✅ Indexed email: ${parsed.subject}`);
+            } catch (indexError: any) {
+              console.error("❌ Index error:", indexError.message);
+            }
+          });
+        });
+      });
+
+      fetch.once("error", (err) => {
+        console.error("❌ Fetch error:", err.message);
+      });
+
+      fetch.once("end", () => {
+        console.log("✅ Finished fetching emails");
+      });
+    });
+  } catch (error: any) {
+    console.error("❌ Fetch emails error:", error.message);
+  }
 }
 
-export function getAllEmails() {
-  return emailsStore;
-}
-
-export function clearEmails() {
-  emailsStore = [];
-  console.log("✅ Cleared all emails from memory");
-}
-
-export function getEmailCount() {
-  return emailsStore.length;
+export function stopImapSync() {
+  if (imap) {
+    imap.end();
+    console.log("✅ IMAP sync stopped");
+  }
 }
